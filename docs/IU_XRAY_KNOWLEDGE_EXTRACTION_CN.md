@@ -1,79 +1,137 @@
-# IU-Xray 医学知识抽取使用手册
+# AutoDL 上运行 IU-Xray 医学知识抽取手册
 
-本文档说明如何在云服务器上使用本仓库对 IU-Xray 报告文本进行知识抽取。云服务器上的仓库路径假设为：
-
-```bash
-/root/autodl-tmp/radgraph
-```
-
-## 1. 功能概览
-
-新增的 IU-Xray 适配脚本会完成以下流程：
+本文档针对你的 AutoDL 实例编写：
 
 ```text
-IU-Xray CSV 读取
--> findings/impression 分节抽取
--> RadGraph 实体关系抽取
--> MeSH/Problems 解析
--> 合并成 report-level 医学知识图谱
--> 关联 frontal/lateral 图像文件名
+镜像：PyTorch 2.8.0
+Python：3.12, Ubuntu 22.04
+CUDA：12.8
+GPU：vGPU 48GB * 1
+CPU：25 vCPU
+内存：92GB
+硬盘：系统盘 30GB，数据盘 /root/autodl-tmp 50GB
+仓库位置：/root/autodl-tmp/radgraph
 ```
 
-输出文件为 JSONL，每一行对应一份报告，包含报告级标签、分节 RadGraph 结果、图片映射和知识图谱节点/边。
+这个实例配置很充足，可以直接跑 IU-Xray 全量文本知识抽取。因为实例即用即删，下面不创建虚拟环境，直接使用镜像自带的 Python 和 PyTorch。
 
-## 2. 环境准备
-
-进入仓库并创建虚拟环境：
+## 1. 先进入仓库
 
 ```bash
 cd /root/autodl-tmp/radgraph
-python -m venv .venv
-source .venv/bin/activate
+```
+
+确认当前 Python 和 PyTorch：
+
+```bash
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("cuda version:", torch.version.cuda)
+print("gpu:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
+PY
+```
+
+正常情况下应看到 `cuda available: True`。
+
+## 2. 安装缺失依赖
+
+不要重装 PyTorch。你的镜像已经有 PyTorch 2.8.0 + CUDA 12.8，只需要补本项目依赖。
+
+```bash
+cd /root/autodl-tmp/radgraph
+
 python -m pip install -U pip
+python -m pip install -e .
+python -m pip install huggingface_hub numpy
 ```
 
-安装项目依赖：
+如果网络慢，可以加清华源：
 
 ```bash
-pip install -e .
-pip install huggingface_hub
+python -m pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip install huggingface_hub numpy -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-如果服务器环境没有 PyTorch，请按你的 CUDA 版本安装。例如 CUDA 12.1 可尝试：
+检查依赖是否齐全：
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+python - <<'PY'
+mods = [
+    "torch",
+    "transformers",
+    "appdirs",
+    "jsonpickle",
+    "filelock",
+    "h5py",
+    "nltk",
+    "dotmap",
+    "huggingface_hub",
+    "numpy",
+]
+for m in mods:
+    try:
+        mod = __import__(m)
+        print(m, "OK", getattr(mod, "__version__", ""))
+    except Exception as e:
+        print(m, "MISSING", e)
+PY
 ```
 
-CPU 环境可用：
+如果某个包显示 `MISSING`，单独安装即可，例如：
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install dotmap
 ```
 
-## 3. 数据位置
+## 3. 把缓存放到数据盘
 
-默认使用以下文件：
-
-```bash
-/root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_reports.csv
-/root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_projections.csv
-```
-
-`indiana_reports.csv` 提供 `uid, MeSH, Problems, image, indication, comparison, findings, impression`。
-
-`indiana_projections.csv` 提供 `uid, filename, projection`，用于关联 frontal/lateral 图像文件名。
-
-## 4. 首次试跑
-
-首次运行会从 Hugging Face 下载 RadGraph 权重，建议先跑 10 条确认环境正常：
+AutoDL 系统盘只有 30GB，不建议把模型缓存放到 `/root/.cache`。建议全部放到 `/root/autodl-tmp/radgraph/cache`。
 
 ```bash
 cd /root/autodl-tmp/radgraph
-source .venv/bin/activate
 
-mkdir -p outputs cache/radgraph cache/huggingface
+mkdir -p outputs
+mkdir -p cache/radgraph
+mkdir -p cache/huggingface
+
 export HF_HOME=/root/autodl-tmp/radgraph/cache/huggingface
+export TRANSFORMERS_CACHE=/root/autodl-tmp/radgraph/cache/huggingface
+```
+
+这两个 `export` 只对当前终端有效。如果你重新打开终端，需要重新执行。
+
+## 4. 确认数据文件存在
+
+```bash
+ls -lh /root/autodl-tmp/radgraph/IU-Xray_only_text/
+```
+
+应能看到：
+
+```text
+indiana_reports.csv
+indiana_projections.csv
+images_normalized/
+```
+
+其中：
+
+- `indiana_reports.csv`：报告文本、MeSH、Problems
+- `indiana_projections.csv`：uid 和 frontal/lateral 图像文件名映射
+- `images_normalized/`：你当前只放了少量图片样例，不影响文本知识抽取
+
+## 5. 先试跑 10 条
+
+第一次运行会自动下载 RadGraph 权重 `modern-radgraph-xl.tar.gz`，需要等一会儿。
+
+```bash
+cd /root/autodl-tmp/radgraph
+
+export HF_HOME=/root/autodl-tmp/radgraph/cache/huggingface
+export TRANSFORMERS_CACHE=/root/autodl-tmp/radgraph/cache/huggingface
 
 python -m radgraph.iuxray \
   --reports-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_reports.csv \
@@ -85,22 +143,66 @@ python -m radgraph.iuxray \
   --limit 10
 ```
 
-如果没有 GPU，把 `--cuda 0` 改成：
+你的 GPU 有 48GB 显存，`--cuda 0` 可以直接使用。
 
-```bash
---cuda -1
+如果命令最后输出类似下面内容，说明试跑完成：
+
+```json
+{
+  "total_reports": 10,
+  "processed_reports": 10,
+  "skipped_reports": 0
+}
 ```
 
-## 5. 全量抽取
+检查输出：
 
-确认试跑成功后，执行全量抽取：
+```bash
+wc -l /root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl
+head -n 1 /root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl
+```
+
+## 6. 查看一条抽取结果
+
+```bash
+python - <<'PY'
+import json
+
+path = "/root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl"
+with open(path, "r", encoding="utf-8") as f:
+    item = json.loads(next(f))
+
+print("uid:", item["uid"])
+print("problems:", item["problems"])
+print("mesh 前 3 个:", item["mesh"][:3])
+print("sections:", [s["name"] for s in item["sections"]])
+print("nodes:", len(item["knowledge_graph"]["nodes"]))
+print("edges:", len(item["knowledge_graph"]["edges"]))
+
+for sec in item["sections"]:
+    print("\nSECTION:", sec["name"])
+    for obs in sec["processed_annotations"][:5]:
+        print(obs)
+PY
+```
+
+重点看：
+
+- `problems`：报告级疾病标签
+- `mesh`：拆解后的 IU-Xray MeSH 知识
+- `sections`：分开的 `findings` / `impression`
+- `processed_annotations`：RadGraph 抽出的 observation、location、tag
+- `knowledge_graph`：融合后的节点和边
+
+## 7. 全量抽取
+
+试跑正常后，执行全量抽取：
 
 ```bash
 cd /root/autodl-tmp/radgraph
-source .venv/bin/activate
 
-mkdir -p outputs cache/radgraph cache/huggingface
 export HF_HOME=/root/autodl-tmp/radgraph/cache/huggingface
+export TRANSFORMERS_CACHE=/root/autodl-tmp/radgraph/cache/huggingface
 
 nohup python -m radgraph.iuxray \
   --reports-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_reports.csv \
@@ -113,23 +215,39 @@ nohup python -m radgraph.iuxray \
   > /root/autodl-tmp/radgraph/outputs/iuxray_extract.log 2>&1 &
 ```
 
-查看日志：
+查看运行日志：
 
 ```bash
 tail -f /root/autodl-tmp/radgraph/outputs/iuxray_extract.log
 ```
 
-查看输出行数：
+查看已输出多少条：
 
 ```bash
 wc -l /root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl
 ```
 
-`--resume` 会跳过输出文件里已经存在的 `uid`，适合断点续跑。
+IU-Xray 当前有 3851 条报告，其中有些报告没有 `findings` 和 `impression`，脚本会跳过空文本报告。
 
-## 6. 输出结构
+## 8. 断点续跑
 
-每行 JSON 大致结构如下：
+如果 AutoDL 实例中断或你手动停止，保留输出文件后重新运行同一条全量命令即可。因为命令里带了：
+
+```bash
+--resume
+```
+
+脚本会读取已有 JSONL 中的 `uid`，跳过已经完成的报告。
+
+## 9. 输出文件说明
+
+输出路径：
+
+```bash
+/root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl
+```
+
+每一行是一份报告，结构大致如下：
 
 ```json
 {
@@ -137,7 +255,7 @@ wc -l /root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl
   "image": "PA and lateral views of the chest",
   "indication": "patient with ...",
   "comparison": "None available",
-  "problems": ["Pulmonary Fibrosis", "Opacity"],
+  "problems": ["Pulmonary Disease, Chronic Obstructive", "Opacity"],
   "mesh": [
     {
       "raw": "Opacity/lung/apex/left/irregular",
@@ -150,7 +268,9 @@ wc -l /root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl
     }
   ],
   "images": {
-    "all": [{"filename": "4_IM-2050-1001.dcm.png", "projection": "Frontal"}],
+    "all": [
+      {"filename": "4_IM-2050-1001.dcm.png", "projection": "Frontal"}
+    ],
     "frontal": ["4_IM-2050-1001.dcm.png"],
     "lateral": ["4_IM-2050-2001.dcm.png"]
   },
@@ -169,7 +289,7 @@ wc -l /root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl
 }
 ```
 
-其中 `knowledge_graph.edges` 常见关系包括：
+常见图谱关系：
 
 ```text
 report -> has_problem -> problem
@@ -177,55 +297,105 @@ report -> has_mesh -> mesh
 report -> linked_image -> image
 report -> has_section -> section
 section -> has_observation -> observation
+report -> has_observation -> observation
 observation -> located_at -> anatomy
 observation -> suggestive_of -> suggestion
 ```
 
-## 7. 快速检查输出
+## 10. 常见问题
 
-查看第一条结果的核心字段：
+### 10.1 ModuleNotFoundError: dotmap / appdirs / transformers
+
+说明依赖没装完整，执行：
 
 ```bash
-python - <<'PY'
-import json
-path = "/root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl"
-with open(path, "r", encoding="utf-8") as f:
-    item = json.loads(next(f))
-print("uid:", item["uid"])
-print("problems:", item["problems"])
-print("mesh first:", item["mesh"][:1])
-print("sections:", [s["name"] for s in item["sections"]])
-print("nodes:", len(item["knowledge_graph"]["nodes"]))
-print("edges:", len(item["knowledge_graph"]["edges"]))
-PY
+cd /root/autodl-tmp/radgraph
+python -m pip install -e .
+python -m pip install huggingface_hub numpy
 ```
 
-## 8. 质量建议
+### 10.2 Hugging Face 下载失败
 
-- 推荐使用 `modern-radgraph-xl`，它的标签更清晰，例如 `Observation::definitely present`、`Observation::definitely absent`、`Observation::uncertain`。
-- 脚本会分开处理 `findings` 和 `impression`，避免把结论和正文直接拼接后造成重复实体。
-- `MeSH` 和 `Problems` 是报告级弱监督标签，适合用于知识融合、检索、多标签监督。
-- RadGraph 输出更适合做细粒度实体关系，例如发现、部位、否定、不确定性和提示关系。
-- `XXXX` 脱敏占位符已做轻量清洗，例如 `No XXXX of` 会变成 `No evidence of`，`x-XXXX` 会变成 `x-ray`。
+先确认网络能访问 Hugging Face。也可以重新运行，`hf_hub_download` 会复用已下载部分。
 
-## 9. 常见问题
+缓存目录建议一直使用：
 
-如果 Hugging Face 下载失败，检查网络或提前下载 `StanfordAIMI/RRG_scorers` 中的 `modern-radgraph-xl.tar.gz`。脚本默认会把模型缓存到 `--model-cache-dir` 指定目录。
+```bash
+--model-cache-dir /root/autodl-tmp/radgraph/cache/radgraph
+```
 
-如果显存不足，使用 CPU：
+并设置：
+
+```bash
+export HF_HOME=/root/autodl-tmp/radgraph/cache/huggingface
+```
+
+### 10.3 系统盘快满了
+
+检查：
+
+```bash
+df -h
+du -sh /root/.cache || true
+du -sh /root/autodl-tmp/radgraph/cache || true
+```
+
+如果 `/root/.cache` 很大，可以删掉后重新用数据盘缓存：
+
+```bash
+rm -rf /root/.cache/huggingface
+```
+
+然后重新设置：
+
+```bash
+export HF_HOME=/root/autodl-tmp/radgraph/cache/huggingface
+export TRANSFORMERS_CACHE=/root/autodl-tmp/radgraph/cache/huggingface
+```
+
+### 10.4 想先少量调试
+
+使用：
+
+```bash
+--limit 20
+```
+
+### 10.5 想用 CPU
+
+你的 GPU 足够，不建议用 CPU。除非 GPU 不可用，才把：
+
+```bash
+--cuda 0
+```
+
+改成：
 
 ```bash
 --cuda -1
 ```
 
-如果中途停止，重新运行同一条命令并保留：
+## 11. 最推荐执行顺序
 
 ```bash
---resume
+cd /root/autodl-tmp/radgraph
+
+python -m pip install -U pip
+python -m pip install -e .
+python -m pip install huggingface_hub numpy
+
+mkdir -p outputs cache/radgraph cache/huggingface
+export HF_HOME=/root/autodl-tmp/radgraph/cache/huggingface
+export TRANSFORMERS_CACHE=/root/autodl-tmp/radgraph/cache/huggingface
+
+python -m radgraph.iuxray \
+  --reports-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_reports.csv \
+  --projections-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_projections.csv \
+  --output-jsonl /root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl \
+  --model-type modern-radgraph-xl \
+  --cuda 0 \
+  --model-cache-dir /root/autodl-tmp/radgraph/cache/radgraph \
+  --limit 10
 ```
 
-如果只想调试少量样本，使用：
-
-```bash
---limit 20
-```
+试跑成功后，再运行全量抽取命令。

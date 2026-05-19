@@ -44,7 +44,7 @@ cd /root/autodl-tmp/radgraph
 
 python -m pip install -U pip
 python -m pip install -e .
-python -m pip install huggingface_hub numpy
+python -m pip install "transformers>=4.39.0,<5.0.0" huggingface_hub numpy
 ```
 
 如果网络慢，可以加清华源：
@@ -52,7 +52,7 @@ python -m pip install huggingface_hub numpy
 ```bash
 python -m pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple
 python -m pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
-python -m pip install huggingface_hub numpy -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip install "transformers>=4.39.0,<5.0.0" huggingface_hub numpy -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 检查依赖是否齐全：
@@ -311,7 +311,18 @@ observation -> suggestive_of -> suggestion
 ```bash
 cd /root/autodl-tmp/radgraph
 python -m pip install -e .
-python -m pip install huggingface_hub numpy
+python -m pip install "transformers>=4.39.0,<5.0.0" huggingface_hub numpy
+```
+
+如果你已经装过一次依赖，并遇到 `TokenizersBackend has no attribute encode_plus`，说明当前环境安装了 Transformers v5 或 v5 预览版。直接执行：
+
+```bash
+python -m pip install "transformers>=4.39.0,<5.0.0"
+python - <<'PY'
+import transformers
+print(transformers.__version__)
+assert transformers.__version__.split(".")[0] == "4"
+PY
 ```
 
 ### 10.2 Hugging Face 下载失败
@@ -382,7 +393,7 @@ cd /root/autodl-tmp/radgraph
 
 python -m pip install -U pip
 python -m pip install -e .
-python -m pip install huggingface_hub numpy
+python -m pip install "transformers>=4.39.0,<5.0.0" huggingface_hub numpy
 
 mkdir -p outputs cache/radgraph cache/huggingface
 export HF_HOME=/root/autodl-tmp/radgraph/cache/huggingface

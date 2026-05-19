@@ -137,6 +137,7 @@ python -m radgraph.iuxray \
   --reports-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_reports.csv \
   --projections-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_projections.csv \
   --output-jsonl /root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl \
+  --radgraph-only-jsonl /root/autodl-tmp/radgraph/outputs/iuxray_radgraph_only_sample.jsonl \
   --model-type modern-radgraph-xl \
   --cuda 0 \
   --model-cache-dir /root/autodl-tmp/radgraph/cache/radgraph \
@@ -159,6 +160,7 @@ python -m radgraph.iuxray \
 
 ```bash
 wc -l /root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl
+wc -l /root/autodl-tmp/radgraph/outputs/iuxray_radgraph_only_sample.jsonl
 head -n 1 /root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl
 ```
 
@@ -208,6 +210,7 @@ nohup python -m radgraph.iuxray \
   --reports-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_reports.csv \
   --projections-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_projections.csv \
   --output-jsonl /root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl \
+  --radgraph-only-jsonl /root/autodl-tmp/radgraph/outputs/iuxray_radgraph_only.jsonl \
   --model-type modern-radgraph-xl \
   --cuda 0 \
   --model-cache-dir /root/autodl-tmp/radgraph/cache/radgraph \
@@ -225,6 +228,7 @@ tail -f /root/autodl-tmp/radgraph/outputs/iuxray_extract.log
 
 ```bash
 wc -l /root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl
+wc -l /root/autodl-tmp/radgraph/outputs/iuxray_radgraph_only.jsonl
 ```
 
 IU-Xray 当前有 3851 条报告，其中有些报告没有 `findings` 和 `impression`，脚本会跳过空文本报告。
@@ -245,9 +249,10 @@ IU-Xray 当前有 3851 条报告，其中有些报告没有 `findings` 和 `impr
 
 ```bash
 /root/autodl-tmp/radgraph/outputs/iuxray_knowledge.jsonl
+/root/autodl-tmp/radgraph/outputs/iuxray_radgraph_only.jsonl
 ```
 
-每一行是一份报告，结构大致如下：
+`iuxray_knowledge.jsonl` 是最终融合结果，包含 IU-Xray 的 `MeSH`、`Problems`、正常标签、图片映射、RadGraph 分节结果和 report-level 知识图谱。每一行是一份报告，结构大致如下：
 
 ```json
 {
@@ -255,6 +260,11 @@ IU-Xray 当前有 3851 条报告，其中有些报告没有 `findings` 和 `impr
   "image": "PA and lateral views of the chest",
   "indication": "patient with ...",
   "comparison": "None available",
+  "normal_labels": {
+    "mesh": false,
+    "problems": false,
+    "is_normal": false
+  },
   "problems": ["Pulmonary Disease, Chronic Obstructive", "Opacity"],
   "mesh": [
     {
@@ -301,6 +311,41 @@ report -> has_observation -> observation
 observation -> located_at -> anatomy
 observation -> suggestive_of -> suggestion
 ```
+
+`iuxray_radgraph_only.jsonl` 是中间结果，只保留 RadGraph 对 `findings` / `impression` 的分节抽取结果，不包含 `MeSH`、`Problems` 和融合知识图谱。它适合以后迁移到私有报告数据集时复用。结构大致如下：
+
+```json
+{
+  "uid": "4",
+  "image": "PA and lateral views of the chest",
+  "indication": "patient with ...",
+  "comparison": "None available",
+  "images": {
+    "all": [
+      {"filename": "4_IM-2050-1001.dcm.png", "projection": "Frontal"}
+    ],
+    "frontal": ["4_IM-2050-1001.dcm.png"],
+    "lateral": ["4_IM-2050-2001.dcm.png"]
+  },
+  "sections": [
+    {
+      "name": "findings",
+      "text": "...",
+      "radgraph_annotations": {},
+      "processed_annotations": [
+        {
+          "observation": "pneumothorax",
+          "located_at": [],
+          "tags": ["definitely absent"],
+          "suggestive_of": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+对于私有报告，如果没有 IU-Xray 的 `MeSH` 和 `Problems`，优先参考这个中间结果文件格式。
 
 ## 10. 常见问题
 
@@ -403,6 +448,7 @@ python -m radgraph.iuxray \
   --reports-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_reports.csv \
   --projections-csv /root/autodl-tmp/radgraph/IU-Xray_only_text/indiana_projections.csv \
   --output-jsonl /root/autodl-tmp/radgraph/outputs/iuxray_knowledge_sample.jsonl \
+  --radgraph-only-jsonl /root/autodl-tmp/radgraph/outputs/iuxray_radgraph_only_sample.jsonl \
   --model-type modern-radgraph-xl \
   --cuda 0 \
   --model-cache-dir /root/autodl-tmp/radgraph/cache/radgraph \

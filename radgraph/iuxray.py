@@ -90,6 +90,10 @@ def parse_semicolon_terms(value: Optional[str], drop_normal: bool = True) -> Lis
     return terms
 
 
+def has_normal_label(value: Optional[str]) -> bool:
+    return any(term.lower() == "normal" for term in parse_semicolon_terms(value, drop_normal=False))
+
+
 def parse_mesh_terms(mesh_value: Optional[str]) -> List[Dict[str, object]]:
     parsed_terms = []
     for raw_term in parse_semicolon_terms(mesh_value):
@@ -198,6 +202,12 @@ def load_iuxray_reports(
                     "comparison": clean_report_text(row.get("comparison")),
                     "problems": parse_semicolon_terms(row.get("Problems")),
                     "mesh": parse_mesh_terms(row.get("MeSH")),
+                    "normal_labels": {
+                        "mesh": has_normal_label(row.get("MeSH")),
+                        "problems": has_normal_label(row.get("Problems")),
+                        "is_normal": has_normal_label(row.get("MeSH"))
+                        or has_normal_label(row.get("Problems")),
+                    },
                     "images": projection_index.get(
                         uid, {"all": [], "frontal": [], "lateral": []}
                     ),
@@ -349,9 +359,23 @@ def build_report_knowledge(report: Dict, section_results: List[Dict]) -> Dict:
         "comparison": report.get("comparison", ""),
         "problems": report.get("problems", []),
         "mesh": report.get("mesh", []),
+        "normal_labels": report.get(
+            "normal_labels", {"mesh": False, "problems": False, "is_normal": False}
+        ),
         "images": report.get("images", {"all": [], "frontal": [], "lateral": []}),
         "sections": section_results,
         "knowledge_graph": {"nodes": nodes, "edges": edges},
+    }
+
+
+def build_radgraph_only_record(report: Dict, section_results: List[Dict]) -> Dict:
+    return {
+        "uid": report["uid"],
+        "image": report.get("image", ""),
+        "indication": report.get("indication", ""),
+        "comparison": report.get("comparison", ""),
+        "images": report.get("images", {"all": [], "frontal": [], "lateral": []}),
+        "sections": section_results,
     }
 
 
@@ -397,9 +421,18 @@ def processed_uids_from_jsonl(output_jsonl: Path) -> set:
     return processed
 
 
+def open_optional_jsonl(path: Optional[Path], mode: str):
+    if path is None:
+        return None
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.open(mode, encoding="utf-8")
+
+
 def run_iuxray_extraction(
     reports_csv: Path,
     output_jsonl: Path,
+    radgraph_only_jsonl: Optional[Path] = None,
     projections_csv: Optional[Path] = None,
     model_type: str = "modern-radgraph-xl",
     cuda: Optional[int] = None,
@@ -428,44 +461,58 @@ def run_iuxray_extraction(
     stats = {"total_reports": len(reports), "processed_reports": 0, "skipped_reports": 0}
 
     with output_jsonl.open(mode, encoding="utf-8") as out:
-        for report in reports:
-            if report["uid"] in already_done:
-                stats["skipped_reports"] += 1
-                continue
-            if not report["text_sections"]:
-                stats["skipped_reports"] += 1
-                continue
+        rg_out = open_optional_jsonl(radgraph_only_jsonl, mode)
+        try:
+            for report in reports:
+                if report["uid"] in already_done:
+                    stats["skipped_reports"] += 1
+                    continue
+                if not report["text_sections"]:
+                    stats["skipped_reports"] += 1
+                    continue
 
-            section_results = []
-            for section in report["text_sections"]:
-                try:
-                    annotations = radgraph([section["text"]])
-                    processed = processor(annotations)
-                    section_results.append(
-                        {
-                            "name": section["name"],
-                            "text": section["text"],
-                            "radgraph_annotations": annotations,
-                            "processed_annotations": processed.get("processed_annotations", []),
-                        }
-                    )
-                except Exception as exc:
-                    if not continue_on_error:
-                        raise
-                    section_results.append(
-                        {
-                            "name": section["name"],
-                            "text": section["text"],
-                            "error": str(exc),
-                            "radgraph_annotations": None,
-                            "processed_annotations": [],
-                        }
-                    )
+                section_results = []
+                for section in report["text_sections"]:
+                    try:
+                        annotations = radgraph([section["text"]])
+                        processed = processor(annotations)
+                        section_results.append(
+                            {
+                                "name": section["name"],
+                                "text": section["text"],
+                                "radgraph_annotations": annotations,
+                                "processed_annotations": processed.get("processed_annotations", []),
+                            }
+                        )
+                    except Exception as exc:
+                        if not continue_on_error:
+                            raise
+                        section_results.append(
+                            {
+                                "name": section["name"],
+                                "text": section["text"],
+                                "error": str(exc),
+                                "radgraph_annotations": None,
+                                "processed_annotations": [],
+                            }
+                        )
 
-            knowledge = build_report_knowledge(report, section_results)
-            out.write(json.dumps(knowledge, ensure_ascii=False) + "\n")
-            out.flush()
-            stats["processed_reports"] += 1
+                knowledge = build_report_knowledge(report, section_results)
+                out.write(json.dumps(knowledge, ensure_ascii=False) + "\n")
+                out.flush()
+                if rg_out is not None:
+                    rg_out.write(
+                        json.dumps(
+                            build_radgraph_only_record(report, section_results),
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                    rg_out.flush()
+                stats["processed_reports"] += 1
+        finally:
+            if rg_out is not None:
+                rg_out.close()
 
     return stats
 
@@ -474,6 +521,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract IU-Xray report knowledge with RadGraph.")
     parser.add_argument("--reports-csv", required=True, help="Path to indiana_reports.csv")
     parser.add_argument("--output-jsonl", required=True, help="Output JSONL path")
+    parser.add_argument("--radgraph-only-jsonl", help="Optional RadGraph-only JSONL output path")
     parser.add_argument("--projections-csv", help="Optional path to indiana_projections.csv")
     parser.add_argument("--model-type", default="modern-radgraph-xl")
     parser.add_argument("--cuda", type=int, default=None, help="GPU id, or -1 for CPU")
@@ -491,6 +539,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         reports_csv=Path(args.reports_csv),
         projections_csv=Path(args.projections_csv) if args.projections_csv else None,
         output_jsonl=Path(args.output_jsonl),
+        radgraph_only_jsonl=Path(args.radgraph_only_jsonl)
+        if args.radgraph_only_jsonl
+        else None,
         model_type=args.model_type,
         cuda=args.cuda,
         model_cache_dir=args.model_cache_dir,

@@ -105,6 +105,43 @@ def test_load_reports_creates_sections_and_links_projection_images(tmp_path):
     assert report["images"]["lateral"] == ["1_lateral.png"]
 
 
+def test_load_reports_preserves_normal_label_as_report_metadata(tmp_path):
+    iuxray = load_iuxray_module()
+    reports_csv = tmp_path / "indiana_reports.csv"
+
+    write_csv(
+        reports_csv,
+        [
+            "uid",
+            "MeSH",
+            "Problems",
+            "image",
+            "indication",
+            "comparison",
+            "findings",
+            "impression",
+        ],
+        [
+            {
+                "uid": "1",
+                "MeSH": "normal",
+                "Problems": "normal",
+                "image": "Xray Chest PA and Lateral",
+                "indication": "Positive TB test",
+                "comparison": "None.",
+                "findings": "No focal consolidation.",
+                "impression": "Normal chest x-ray.",
+            }
+        ],
+    )
+
+    report = iuxray.load_iuxray_reports(reports_csv)[0]
+
+    assert report["problems"] == []
+    assert report["mesh"] == []
+    assert report["normal_labels"] == {"mesh": True, "problems": True, "is_normal": True}
+
+
 def test_build_report_knowledge_merges_labels_sections_and_images():
     iuxray = load_iuxray_module()
     report = {
@@ -113,6 +150,7 @@ def test_build_report_knowledge_merges_labels_sections_and_images():
         "indication": "Dyspnea",
         "comparison": "None",
         "problems": ["Pleural Effusion"],
+        "normal_labels": {"mesh": False, "problems": False, "is_normal": False},
         "mesh": [
             {
                 "raw": "Pleural Effusion/right/small",
@@ -155,6 +193,7 @@ def test_build_report_knowledge_merges_labels_sections_and_images():
     knowledge = iuxray.build_report_knowledge(report, section_results)
 
     assert knowledge["uid"] == "7"
+    assert knowledge["normal_labels"] == {"mesh": False, "problems": False, "is_normal": False}
     assert knowledge["sections"][0]["processed_annotations"][0]["observation"] == "small effusion"
     edge_triples = {
         (edge["source"], edge["relation"], edge["target"])
@@ -174,6 +213,7 @@ def test_run_iuxray_extraction_writes_jsonl_with_fake_radgraph(tmp_path):
     iuxray = load_iuxray_module()
     reports_csv = tmp_path / "reports.csv"
     output_jsonl = tmp_path / "knowledge.jsonl"
+    radgraph_only_jsonl = tmp_path / "radgraph_only.jsonl"
 
     write_csv(
         reports_csv,
@@ -248,13 +288,25 @@ def test_run_iuxray_extraction_writes_jsonl_with_fake_radgraph(tmp_path):
     stats = iuxray.run_iuxray_extraction(
         reports_csv=reports_csv,
         output_jsonl=output_jsonl,
+        radgraph_only_jsonl=radgraph_only_jsonl,
         radgraph=FakeRadGraph(),
         processor=fake_processor,
     )
 
     lines = [json.loads(line) for line in output_jsonl.read_text(encoding="utf-8").splitlines()]
+    rg_lines = [
+        json.loads(line)
+        for line in radgraph_only_jsonl.read_text(encoding="utf-8").splitlines()
+    ]
     assert stats == {"total_reports": 2, "processed_reports": 1, "skipped_reports": 1}
     assert len(lines) == 1
+    assert len(rg_lines) == 1
     assert lines[0]["uid"] == "1"
+    assert lines[0]["normal_labels"] == {"mesh": False, "problems": False, "is_normal": False}
     assert lines[0]["sections"][0]["name"] == "findings"
     assert lines[0]["knowledge_graph"]["nodes"][0]["id"] == "report:1"
+    assert rg_lines[0]["uid"] == "1"
+    assert "mesh" not in rg_lines[0]
+    assert "problems" not in rg_lines[0]
+    assert "knowledge_graph" not in rg_lines[0]
+    assert rg_lines[0]["sections"][0]["processed_annotations"][0]["observation"] == "mild cardiomegaly"
